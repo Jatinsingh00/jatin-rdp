@@ -1,0 +1,54 @@
+name: Non-Stop-RDP
+on: 
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */6 * * *' # Ye har 6 ghante mein apne aap trigger hoga
+
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 350 # 6 ghante (360m) se 10 min pehle band hoga taaki naya start ho sake
+    steps:
+      - name: Configure Core RDP Settings
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+          Restart-Service -Name TermService -Force
+
+      - name: Create RDP User
+        run: |
+          $password = "Jatin@RDP2026" # Aap isse badal sakte hain
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          if (!(Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+            Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+          }
+          echo "RDP_PASS=$password" >> $env:GITHUB_ENV
+
+      - name: Install & Run Tailscale
+        run: |
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          Invoke-WebRequest -Uri $tsUrl -OutFile "ts.msi"
+          Start-Process msiexec.exe -ArgumentList "/i", "ts.msi", "/quiet", "/norestart" -Wait
+          
+          $TS_PATH = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          # Connect with Auth Key
+          & $TS_PATH up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-rdp-server --accept-routes
+
+          $tsIP = & $TS_PATH ip -4
+          Write-Host "=============================="
+          Write-Host "IP ADDRESS: $tsIP"
+          Write-Host "USER: RDP"
+          Write-Host "PASS: $env:RDP_PASS"
+          Write-Host "=============================="
+
+          # Anti-Disconnect & VPN Monitor Loop
+          while ($true) {
+              $status = & $TS_PATH status --json | ConvertFrom-Json
+              if ($status.BackendState -ne "Running") {
+                  & $TS_PATH up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }}
+              }
+              Start-Sleep -Seconds 60
+          }

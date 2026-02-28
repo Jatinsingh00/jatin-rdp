@@ -1,13 +1,13 @@
-name: Non-Stop-RDP
+name: Non-Stop-RDP-Fixed
 on: 
   workflow_dispatch:
   schedule:
-    - cron: '0 */6 * * *' # Ye har 6 ghante mein apne aap trigger hoga
+    - cron: '0 */6 * * *' # Har 6 ghante mein auto-restart
 
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 350 # 6 ghante (360m) se 10 min pehle band hoga taaki naya start ho sake
+    timeout-minutes: 350
     steps:
       - name: Configure Core RDP Settings
         run: |
@@ -17,14 +17,32 @@ jobs:
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
 
-      - name: Create RDP User
+      - name: Create RDP User with Auto-Password
         run: |
-          $password = "Jatin@RDP2026" # Aap isse badal sakte hain
+          # Strong Random Password Generate karne ka logic
+          $sets = @(
+              (65..90 | Get-Random -Count 3 | % {[char]$_}), # Upper
+              (97..122 | Get-Random -Count 3 | % {[char]$_}), # Lower
+              (48..57 | Get-Random -Count 3 | % {[char]$_}), # Numbers
+              (33, 35, 36, 64 | Get-Random -Count 3 | % {[char]$_}) # Special (@,#,$,!)
+          )
+          $password = -join ($sets | % {$_} | Sort-Object {Get-Random})
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          
+          # User creation
           if (!(Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
-            New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
-            Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+              New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+              Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+              Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+          } else {
+              $user = Get-LocalUser -Name "RDP"
+              $user | Set-LocalUser -Password $securePass
           }
+          
+          Write-Host "=============================="
+          Write-Host "USER: RDP"
+          Write-Host "PASS: $password"
+          Write-Host "=============================="
           echo "RDP_PASS=$password" >> $env:GITHUB_ENV
 
       - name: Install & Run Tailscale
@@ -34,17 +52,12 @@ jobs:
           Start-Process msiexec.exe -ArgumentList "/i", "ts.msi", "/quiet", "/norestart" -Wait
           
           $TS_PATH = "$env:ProgramFiles\Tailscale\tailscale.exe"
-          # Connect with Auth Key
           & $TS_PATH up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-rdp-server --accept-routes
 
           $tsIP = & $TS_PATH ip -4
-          Write-Host "=============================="
-          Write-Host "IP ADDRESS: $tsIP"
-          Write-Host "USER: RDP"
-          Write-Host "PASS: $env:RDP_PASS"
-          Write-Host "=============================="
+          Write-Host "TAILSCALE IP: $tsIP"
 
-          # Anti-Disconnect & VPN Monitor Loop
+          # Anti-Disconnect Loop
           while ($true) {
               $status = & $TS_PATH status --json | ConvertFrom-Json
               if ($status.BackendState -ne "Running") {
